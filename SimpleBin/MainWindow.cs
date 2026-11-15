@@ -17,7 +17,10 @@ namespace SimpleBin
         private readonly System.Windows.Forms.Timer _eventTimer;
         private bool _initialized;
         private bool _isClearing;
-        private bool _removalPending;
+        private readonly VolumeChangeTracker _volumeChanges = new();
+        private bool _suspended;
+        private int _topologyChecksRemaining;
+        private long _refreshDueTick;
 
         public MainWindow(BinHelper binHelper, IconHelper iconHelper)
         {
@@ -51,15 +54,16 @@ namespace SimpleBin
 
             _binHelper = binHelper;
             _eventTimer = new System.Windows.Forms.Timer { Interval = 750 };
-            _eventTimer.Tick += (_, _) =>
-            {
-                _eventTimer.Stop();
-                if (!_isClearing && !_removalPending) UpdateStatsControls();
-            };
+            _eventTimer.Tick += (_, _) => OnRefreshTimer();
             TrayMenu.Opening += (_, _) =>
             {
+                if (_isClearing) return;
                 _eventTimer.Stop();
-                if (!_isClearing && !_removalPending) UpdateStatsControls();
+                _topologyChecksRemaining = 0;
+                if (CanQueryNow())
+                    UpdateStatsControls();
+                else
+                    MarkStateUnavailable();
             };
             _initialized = true;
             UpdateStatsControls();
@@ -89,20 +93,84 @@ namespace SimpleBin
             }
         }
 
+        // One-shot, event-triggered scheduling only; no periodic polling.
+        // The earliest already scheduled refresh wins to avoid starvation.
         private void QueueRefresh(int delay = 750)
         {
-            if (!_initialized || _isClearing || _removalPending || IsDisposed) return;
+            if (!_initialized || _isClearing || _suspended || IsDisposed) return;
+            int remainingHold = _volumeChanges.RemainingHoldMilliseconds(DateTime.UtcNow);
+            if (remainingHold > 0)
+                delay = Math.Max(delay, remainingHold + 250);
+
+            delay = Math.Clamp(delay, 1, 60_000);
+            long due = Environment.TickCount64 + delay;
+            if (_eventTimer.Enabled && _refreshDueTick <= due) return;
             _eventTimer.Stop();
+            _refreshDueTick = due;
             _eventTimer.Interval = delay;
             _eventTimer.Start();
         }
 
-        private static bool IsVolumeNotification(IntPtr data)
+        private bool CanQueryNow() =>
+            !_suspended && !_isClearing &&
+            _volumeChanges.RemainingHoldMilliseconds(DateTime.UtcNow) == 0;
+
+        private void OnRefreshTimer()
         {
+            _eventTimer.Stop();
+            if (_isClearing || _suspended || IsDisposed) return;
+            if (!CanQueryNow())
+            {
+                QueueRefresh(750);
+                return;
+            }
+
+            UpdateStatsControls();
+            if (_topologyChecksRemaining > 0)
+            {
+                --_topologyChecksRemaining;
+                if (_topologyChecksRemaining > 0)
+                    QueueRefresh(1800); // One bounded second check.
+            }
+        }
+
+        private void QueueTopologyRefresh()
+        {
+            _topologyChecksRemaining = Math.Max(_topologyChecksRemaining, 2);
+            QueueRefresh(1100);
+        }
+
+        private void RecordVolumeEvent(VolumeEvent action, uint letters)
+        {
+            _volumeChanges.Observe(action, letters, DateTime.UtcNow);
+            if (VolumeSnapshot.TryReadLetters(out uint current))
+                _volumeChanges.ReconcileAssignedLetters(current);
+
+            if (action is VolumeEvent.RemovalRequested or VolumeEvent.RemovalPending)
+            {
+                // Do not query a volume during a removal request. A bounded
+                // grace period protects against missing/cancelled notifications.
+                _eventTimer.Stop();
+                ClearToolStripItem.Enabled = false;
+                QueueRefresh((int)VolumeChangeTracker.RemovalGracePeriod.TotalMilliseconds + 250);
+            }
+            else
+            {
+                QueueTopologyRefresh();
+            }
+        }
+
+        private static bool TryGetDeviceVolumeMask(IntPtr data, out uint letters)
+        {
+            letters = 0;
             if (data == IntPtr.Zero) return false;
-            // DEV_BROADCAST_HDR: size, device type, reserved. DBT_DEVTYP_VOLUME = 2.
-            return System.Runtime.InteropServices.Marshal.ReadInt32(data) >= 12 &&
-                   System.Runtime.InteropServices.Marshal.ReadInt32(data, 4) == 2;
+            // DEV_BROADCAST_VOLUME: 12-byte header, unitmask at byte 12.
+            int size = System.Runtime.InteropServices.Marshal.ReadInt32(data);
+            if (size < 20 || size > 4096 ||
+                System.Runtime.InteropServices.Marshal.ReadInt32(data, 4) != 2)
+                return false;
+            letters = unchecked((uint)System.Runtime.InteropServices.Marshal.ReadInt32(data, 12));
+            return true;
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -156,11 +224,6 @@ namespace SimpleBin
             this.Hide();
             TrayIcon.Visible = true;
 
-            //GC.Collect(2, GCCollectionMode.Forced);
-            //GC.WaitForPendingFinalizers();
-
-            //// 3. Î÷èñòêà êýøà GDI+
-            //System.Drawing.Graphics.FromHwnd(IntPtr.Zero).Dispose();
         }
 
         private void ShowForm()
@@ -171,29 +234,45 @@ namespace SimpleBin
             this.ShowInTaskbar = true;
         }
 
+        private void MarkStateUnavailable()
+        {
+            SizeToolStripItem.Text = "Size: unavailable";
+            ElementsToolStripItem.Text = "Items: unavailable";
+            ClearToolStripItem.Enabled = false;
+            TrayIcon.Icon = _iconHelper.GetIcon(); // Never falsely depict empty.
+            TrayIcon.Text = "SimpleBin Safe - state unavailable";
+        }
+
         private void UpdateStatsControls()
         {
+            if (!CanQueryNow())
+            {
+                MarkStateUnavailable();
+                return;
+            }
+
             try
             {
+                var before = VolumeSnapshot.Capture(_volumeChanges.Version);
                 var (byteSize, itemCount) = BinHelper.GetBinSize();
+                var after = VolumeSnapshot.Capture(_volumeChanges.Version);
+                if (!before.Matches(after))
+                    throw new InvalidOperationException(
+                        "Mounted drives changed while reading Recycle Bin state.");
+
                 SizeToolStripItem.Text = $"{SizeToolStripItem.Text?.Split()[0]} {ConvertSizeToString(byteSize)}";
                 ElementsToolStripItem.Text = $"{ElementsToolStripItem.Text?.Split()[0]} {itemCount}";
-                ClearToolStripItem.Enabled = itemCount > 0 && !_isClearing && !_removalPending;
+                ClearToolStripItem.Enabled = itemCount > 0;
                 TrayIcon.Icon = itemCount == 0
                     ? _iconHelper.GetEmptyIcon()
                     : _iconHelper.GetIcon();
                 TrayIcon.Text = _shellMonitor.IsActive
-                    ? "SimpleBin Safe"
-                    : "SimpleBin Safe - notifications unavailable";
+                    ? "SimpleBin Safe" : "SimpleBin Safe - notifications unavailable";
             }
-            catch (Exception)
+            catch
             {
-                // Unknown is never treated as an empty Recycle Bin.
-                SizeToolStripItem.Text = "Size: unavailable";
-                ElementsToolStripItem.Text = "Items: unavailable";
-                ClearToolStripItem.Enabled = false;
-                TrayIcon.Icon = _iconHelper.GetIcon();
-                TrayIcon.Text = "SimpleBin Safe - state unavailable";
+                // Read errors, including a drive topology race, never mean empty.
+                MarkStateUnavailable();
             }
         }
 
@@ -201,13 +280,17 @@ namespace SimpleBin
 
         private void ClearToolStripItem_Click(object sender, EventArgs e)
         {
-            if (_isClearing || _removalPending || IsDisposed) return;
+            if (!CanQueryNow() || IsDisposed) return;
 
-            // The existing menu state can be stale. Fail closed if Windows
-            // cannot report the current Recycle Bin count.
+            VolumeSnapshot before;
             try
             {
+                before = VolumeSnapshot.Capture(_volumeChanges.Version);
                 var (_, count) = BinHelper.GetBinSize();
+                var again = VolumeSnapshot.Capture(_volumeChanges.Version);
+                if (!before.Matches(again))
+                    throw new InvalidOperationException(
+                        "A drive was connected or disconnected during verification.");
                 if (count == 0)
                 {
                     UpdateStatsControls();
@@ -216,67 +299,75 @@ namespace SimpleBin
             }
             catch (Exception ex)
             {
-                UpdateStatsControls();
+                MarkStateUnavailable();
                 MessageBox.Show(
-                    "Windows could not verify the Recycle Bin contents. Nothing was deleted.\n" +
-                    ex.Message,
+                    "Windows could not verify the Recycle Bin. Nothing was deleted.\n" + ex.Message,
                     "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // No application-created confirmation dialog: leave confirmation
-            // and progress UI to Windows Shell (SHERB_* suppression flags = 0).
-            // Whether Shell displays a prompt can depend on Windows settings.
-
             _isClearing = true;
             _eventTimer.Stop();
+            _topologyChecksRemaining = 0;
             ClearToolStripItem.Enabled = false;
+
             try
             {
-                // The ONLY destructive operation: Windows Shell, all available
-                // Recycle Bins, no direct deletion and no suppressed UI flags.
+                // The ONLY destructive call. Windows Shell performs its own
+                // confirmation/progress UI; no application confirmation added.
                 int hr = BinHelper.ClearBin();
                 const int cancelled = unchecked((int)0x800704C7);
                 if (hr == cancelled) return;
                 if (hr != 0)
                 {
                     MessageBox.Show(
-                        $"Windows did not report a successful Recycle Bin cleanup (HRESULT 0x{hr:X8}).",
+                        $"Windows did not report successful cleanup (HRESULT 0x{hr:X8}).",
                         "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
 
-                try
-                {
-                    long remaining = BinHelper.GetBinSize().itemCount;
-                    if (remaining > 0)
-                    {
-                        MessageBox.Show(
-                            $"Windows reports {remaining} item(s) still in currently accessible Recycle Bins. " +
-                            "The cleanup may be incomplete, or other items may have arrived.",
-                            "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                }
-                catch (Exception ex)
+                VolumeSnapshot after = VolumeSnapshot.Capture(_volumeChanges.Version);
+                if (!before.Matches(after))
                 {
                     MessageBox.Show(
-                        "Windows did not allow the post-cleanup verification. " +
-                        "The empty state cannot be confirmed.\n" + ex.Message,
+                        "The set of connected drives changed during cleanup. " +
+                        "The Recycle Bins on all original drives could not be verified.",
+                        "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                long remaining = BinHelper.GetBinSize().itemCount;
+                VolumeSnapshot verified = VolumeSnapshot.Capture(_volumeChanges.Version);
+                if (!before.Matches(verified))
+                {
+                    MessageBox.Show(
+                        "Connected drives changed during the final Recycle Bin check. " +
+                        "Complete cleanup cannot be confirmed.",
+                        "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                else if (remaining != 0)
+                {
+                    MessageBox.Show(
+                        $"Windows reports {remaining} item(s) still present in accessible Recycle Bins.",
                         "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    "Recycle Bin cleanup did not complete normally.\n" + ex.Message,
-                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "Recycle Bin cleanup could not be fully verified.\n" + ex.Message,
+                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             finally
             {
                 _isClearing = false;
-                // No success is ever inferred from the call's return value
-                // without a fresh attempt to read the state.
-                if (!_removalPending) UpdateStatsControls();
+                if (CanQueryNow())
+                    UpdateStatsControls();
+                else
+                {
+                    MarkStateUnavailable();
+                    QueueTopologyRefresh();
+                }
             }
         }
 
@@ -302,39 +393,42 @@ namespace SimpleBin
 
             if (_initialized &&
                 (m.Msg == ShellChangeMonitor.BinMessage ||
-                 m.Msg == ShellChangeMonitor.DriveMessage))
+                 m.Msg == ShellChangeMonitor.DriveMessage ||
+                 m.Msg == ShellChangeMonitor.DesktopMessage))
             {
-                if (_shellMonitor.ConsumeNotification(m.WParam, m.LParam))
-                    QueueRefresh(m.Msg == ShellChangeMonitor.DriveMessage ? 1100 : 500);
+                bool received = _shellMonitor.ConsumeNotification(m.WParam, m.LParam);
+                if (m.Msg == ShellChangeMonitor.DriveMessage)
+                    RecordVolumeEvent(VolumeEvent.ShellDriveChanged, 0);
+                else if (received)
+                    QueueRefresh(450);
+                // If notification data could not be read, schedule an
+                // ordinary one-off resynchronization rather than trusting it.
                 else
-                    QueueRefresh(1100);
+                    QueueRefresh(1000);
                 return;
             }
 
             if (_initialized && m.Msg == WM_DEVICECHANGE)
             {
                 long code = m.WParam.ToInt64();
-                if (code == 0x0007) // DBT_DEVNODES_CHANGED: a topology change
+                if (code == 0x0007) // DBT_DEVNODES_CHANGED
                 {
-                    // Some virtual volume providers omit the expected final
-                    // volume-specific event. Resynchronize on topology changes.
-                    _removalPending = false;
-                    QueueRefresh(1800);
+                    RecordVolumeEvent(VolumeEvent.TopologyChanged, 0);
                 }
-                else if (IsVolumeNotification(m.LParam))
+                else if (code is 0x8000 or 0x8001 or 0x8002 or 0x8003 or 0x8004)
                 {
-                    if (code == 0x8001 || code == 0x8003) // QUERYREMOVE/PENDING
+                    // Some providers do not include a volume mask. A zero
+                    // mask is treated as unknown, never as 'all volumes'.
+                    TryGetDeviceVolumeMask(m.LParam, out uint letters);
+                    VolumeEvent action = code switch
                     {
-                        _removalPending = true;
-                        _eventTimer.Stop();
-                        ClearToolStripItem.Enabled = false;
-                    }
-                    else if (code == 0x8000 || code == 0x8004 || code == 0x8002)
-                    {
-                        // ARRIVAL, REMOVECOMPLETE or QUERYREMOVEFAILED
-                        _removalPending = false;
-                        QueueRefresh(1100);
-                    }
+                        0x8000 => VolumeEvent.Arrival,
+                        0x8001 => VolumeEvent.RemovalRequested,
+                        0x8002 => VolumeEvent.RemovalCancelled,
+                        0x8003 => VolumeEvent.RemovalPending,
+                        _ => VolumeEvent.RemovalCompleted
+                    };
+                    RecordVolumeEvent(action, letters);
                 }
             }
 
@@ -343,14 +437,14 @@ namespace SimpleBin
                 if (m.WParam.ToInt64() == 0x0004) // PBT_APMSUSPEND
                 {
                     _eventTimer.Stop();
-                    _removalPending = true;
+                    _suspended = true;
                     ClearToolStripItem.Enabled = false;
                 }
                 else if (m.WParam.ToInt64() == 0x0012 ||
-                         m.WParam.ToInt64() == 0x0007) // resume automatic or interactive
+                         m.WParam.ToInt64() == 0x0007)
                 {
-                    _removalPending = false;
-                    QueueRefresh(1100);
+                    _suspended = false;
+                    RecordVolumeEvent(VolumeEvent.TopologyChanged, 0);
                 }
             }
 
