@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 namespace SimpleBin
@@ -33,8 +32,8 @@ namespace SimpleBin
                 cbSize = Marshal.SizeOf<NativeBinMethods.Shqueryrbinfo>()
             };
             int hr = NativeBinMethods.SHQueryRecycleBinW(null, ref info);
-            if (hr < 0)
-                throw new Win32Exception(hr, $"Recycle Bin query failed (HRESULT 0x{hr:X8}).");
+            if (hr != 0)
+                throw new COMException($"Recycle Bin query failed (HRESULT 0x{hr:X8}).", hr);
 
             if (info.i64NumItems < 0 || info.i64Size < 0)
                 throw new InvalidOperationException("Windows returned invalid Recycle Bin counts.");

@@ -59,6 +59,9 @@ namespace SimpleBin
             TrayMenu.Opening += (_, _) =>
             {
                 if (_isClearing) return;
+                // An interactive click proves we are no longer suspended,
+                // even if the OS's resume broadcast was missed.
+                _suspended = false;
                 _eventTimer.Stop();
                 _topologyChecksRemaining = 0;
                 if (CanQueryNow())

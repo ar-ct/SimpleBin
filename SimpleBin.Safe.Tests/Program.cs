@@ -173,19 +173,68 @@ internal static class Program
                 return;
             }
 
+            // Try a genuine Recycle Bin transition using ONLY a uniquely
+            // generated test file on the disposable Windows CI machine.
+            // This code is in the TEST project; it is never in the shipped EXE.
+            int beforeNatural = sink.Notifications;
+            try
+            {
+                string documents = Environment.GetFolderPath(
+                    Environment.SpecialFolder.MyDocuments);
+                if (!Directory.Exists(documents))
+                {
+                    Console.WriteLine("WARN: no Documents folder for natural Shell test.");
+                }
+                else
+                {
+                    string testFile = Path.Combine(documents,
+                        "simplebin-safe-ci-" + Guid.NewGuid().ToString("N") + ".txt");
+                    long startCount = BinHelper.GetBinSize().itemCount;
+                    File.WriteAllText(testFile,
+                        "Unique disposable file created ONLY on a hosted GitHub Actions runner.");
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                        testFile,
+                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        Application.DoEvents();
+                        Thread.Sleep(20);
+                    }
+
+                    long afterCount = BinHelper.GetBinSize().itemCount;
+                    if (afterCount > startCount)
+                        Pass("real test-file move to Windows Recycle Bin is visible",
+                            afterCount > startCount);
+                    else
+                        Console.WriteLine("WARN: CI session did not expose a real Recycle Bin count change.");
+
+                    if (sink.Notifications > beforeNatural)
+                        Pass("real Recycle Bin file operation produced Shell notification",
+                            sink.Notifications > beforeNatural);
+                    else
+                        Console.WriteLine("WARN: no natural Recycle Bin Shell event observed in CI session.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("WARN: noninteractive CI runner could not perform natural Recycle Bin test: " + ex.Message);
+            }
+
+            int beforeSynthetic = sink.Notifications;
             // SHCNE_UPDATEITEM, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT.
             // The only action is sending a Shell change notification in the
             // disposable GitHub Actions runner, not modifying the Recycle Bin.
             SHChangeNotify(0x00002000, 0x2000, binPidl, IntPtr.Zero);
-            for (int i = 0; i < 100 && sink.Notifications == 0; ++i)
+            for (int i = 0; i < 100 && sink.Notifications == beforeSynthetic; ++i)
             {
                 Application.DoEvents();
                 Thread.Sleep(20);
             }
 
-            if (sink.Notifications != 0)
+            if (sink.Notifications > beforeSynthetic)
                 Pass("synthetic Recycle Bin Shell notification arrived",
-                    sink.Notifications > 0);
+                    sink.Notifications > beforeSynthetic);
             else
                 Console.WriteLine("WARN: synthetic Shell notification was not delivered in the non-interactive CI session.");
         }

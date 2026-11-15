@@ -32,7 +32,7 @@ jobs:
           $source = ($sources | Get-Content -Raw) -join "`n"
           $occurrences = ([regex]::Matches($source, 'SHEmptyRecycleBinW\s*\(')).Count
           if ($occurrences -ne 2) { throw "Unexpected deletion entry points: $occurrences" }
-      - name: Run isolated read-only Windows tests
+      - name: Run isolated Windows tests (temporary CI data only)
         shell: pwsh
         run: |
           dotnet run --project SimpleBin.Safe.Tests/SimpleBin.Safe.Tests.csproj -c Release -r win-x64 2>&1 | Tee-Object -FilePath test-results.txt
