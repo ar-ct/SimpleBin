@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace SimpleBin.Helpers
 {
@@ -13,6 +14,9 @@ namespace SimpleBin.Helpers
         internal const int DesktopMessage = 0x8000 + 0x233;
 
         private const int Sources = 0x0001 | 0x0002 | 0x8000;
+        // For the recursive Desktop fallback, listen to Shell broadcasts only.
+        // Do not ask Windows to install interrupt-level FS subtree watchers.
+        private const int ShellOnlySources = 0x0002 | 0x8000;
         // Windows may report Recycle Bin changes as UPDATEITEM, UPDATEDIR,
         // or a change to the Recycle Bin's items rather than the bin root.
         private const int BinEvents = 0x7FFFFFFF;
@@ -22,13 +26,25 @@ namespace SimpleBin.Helpers
         // Recycle Bin is also a shell item displayed on the desktop.
         // Desktop scope is NOT recursive: unrelated deep file activity
         // does not flood the application with notifications.
+        // Capture moves into and out of Recycle Bins on any mounted drive.
+        // Ordinary file creations and directory updates are filtered by PIDL.
         private const int DesktopEvents =
             0x00000001 | // SHCNE_RENAMEITEM
+            0x00000002 | // SHCNE_CREATE
             0x00000004 | // SHCNE_DELETE
+            0x00000008 | // SHCNE_MKDIR
             0x00000010 | // SHCNE_RMDIR
-            0x00001000 | // SHCNE_UPDATEDIR (coalesced events)
+            0x00001000 | // SHCNE_UPDATEDIR
             0x00002000 | // SHCNE_UPDATEITEM
-            0x00008000;  // SHCNE_UPDATEIMAGE
+            0x00008000 | // SHCNE_UPDATEIMAGE
+            0x00020000;  // SHCNE_RENAMEFOLDER
+
+        private const int DeletionOrIconEvents =
+            0x00000001 | 0x00000004 | 0x00000010 |
+            0x00008000 | 0x00020000;
+
+        private const int MaybeRecycleBinEvents =
+            0x00000002 | 0x00000008 | 0x00001000 | 0x00002000;
 
         private static readonly Guid RecycleBinFolder =
             new("B7534046-3ECB-4C18-BE4E-64CD4CB7D6AC");
@@ -66,6 +82,10 @@ namespace SimpleBin.Helpers
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SHChangeNotification_Unlock(IntPtr lockedNotification);
 
+        [DllImport("shell32.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SHGetPathFromIDListW(IntPtr pidl, StringBuilder path);
+
         private uint _binRegistration;
         private uint _driveRegistration;
         private uint _desktopRegistration;
@@ -97,7 +117,7 @@ namespace SimpleBin.Helpers
                     out _desktopPidl);
                 if (hr == 0 && _desktopPidl != IntPtr.Zero)
                     _desktopRegistration = TryRegister(windowHandle, DesktopEvents,
-                        DesktopMessage, _desktopPidl, recursive: true);
+                        DesktopMessage, _desktopPidl, recursive: true, shellOnly: true);
             }
             catch
             {
@@ -116,8 +136,9 @@ namespace SimpleBin.Helpers
         }
 
         private static uint TryRegister(IntPtr hwnd, int events, int message,
-            IntPtr pidl, bool recursive) =>
-            SHChangeNotifyRegister(hwnd, Sources, events, (uint)message, 1,
+            IntPtr pidl, bool recursive, bool shellOnly = false) =>
+            SHChangeNotifyRegister(hwnd, shellOnly ? ShellOnlySources : Sources,
+                events, (uint)message, 1,
                 [new ChangeNotifyEntry { Pidl = pidl, Recursive = recursive }]);
 
         private static uint Register(IntPtr hwnd, int events, int message,
@@ -143,6 +164,57 @@ namespace SimpleBin.Helpers
             if (locked == IntPtr.Zero) return false;
             try { return true; }
             finally { SHChangeNotification_Unlock(locked); }
+        }
+
+        // The desktop is the root of the Shell namespace, so recursive
+        // notifications can include files deleted on separately mounted drives.
+        // No mounted-drive path is opened or watched by this application.
+        internal bool ConsumeDesktopNotification(
+            IntPtr wParam, IntPtr lParam, out bool shouldRefresh)
+        {
+            shouldRefresh = false;
+            IntPtr locked = SHChangeNotification_Lock(
+                wParam, unchecked((uint)lParam.ToInt64()),
+                out IntPtr pidlArray, out int eventId);
+            if (locked == IntPtr.Zero) return false;
+
+            try
+            {
+                int kind = eventId & 0x7FFFFFFF;
+                if ((kind & DeletionOrIconEvents) != 0)
+                {
+                    shouldRefresh = true;
+                }
+                else if ((kind & MaybeRecycleBinEvents) != 0)
+                {
+                    if (pidlArray == IntPtr.Zero)
+                    {
+                        shouldRefresh = true;
+                    }
+                    else
+                    {
+                        IntPtr item = Marshal.ReadIntPtr(pidlArray);
+                        if (item == IntPtr.Zero)
+                        {
+                            shouldRefresh = true;
+                        }
+                        else
+                        {
+                            var path = new StringBuilder(260);
+                            shouldRefresh = !SHGetPathFromIDListW(item, path) ||
+                                path.ToString().Contains("$Recycle.Bin",
+                                    StringComparison.OrdinalIgnoreCase);
+                        }
+                    }
+                }
+                // Ignore irrelevant Shell events, including ordinary file
+                // creations outside Recycle Bins.
+                return true;
+            }
+            finally
+            {
+                SHChangeNotification_Unlock(locked);
+            }
         }
 
         internal void Stop()

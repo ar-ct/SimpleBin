@@ -404,18 +404,26 @@ namespace SimpleBin
             const int WM_DEVICECHANGE = 0x0219;
             const int WM_POWERBROADCAST = 0x0218;
 
+            if (_initialized && m.Msg == ShellChangeMonitor.DesktopMessage)
+            {
+                bool received = _shellMonitor.ConsumeDesktopNotification(
+                    m.WParam, m.LParam, out bool relevant);
+                if (!received)
+                    QueueRefresh(1200); // One conservative resynchronization.
+                else if (relevant)
+                    QueueRefresh(900); // Event-only: coalesced across file operations.
+                return;
+            }
+
             if (_initialized &&
                 (m.Msg == ShellChangeMonitor.BinMessage ||
-                 m.Msg == ShellChangeMonitor.DriveMessage ||
-                 m.Msg == ShellChangeMonitor.DesktopMessage))
+                 m.Msg == ShellChangeMonitor.DriveMessage))
             {
                 bool received = _shellMonitor.ConsumeNotification(m.WParam, m.LParam);
                 if (m.Msg == ShellChangeMonitor.DriveMessage)
                     RecordVolumeEvent(VolumeEvent.ShellDriveChanged, 0);
                 else if (received)
                     QueueRefresh(450);
-                // If notification data could not be read, schedule an
-                // ordinary one-off resynchronization rather than trusting it.
                 else
                     QueueRefresh(1000);
                 return;

@@ -21,6 +21,7 @@ internal static class Program
         internal int Notifications { get; private set; }
         internal int BinNotifications { get; private set; }
         internal int DesktopNotifications { get; private set; }
+        internal int RelevantDesktopNotifications { get; private set; }
         private readonly Dictionary<int,int> _types = new();
         internal string TypeSummary => string.Join(", ",
             _types.OrderBy(x => x.Key).Select(x => $"0x{x.Key:X}={x.Value}"));
@@ -36,13 +37,33 @@ internal static class Program
             if (m.Msg == ShellChangeMonitor.BinMessage ||
                 m.Msg == ShellChangeMonitor.DesktopMessage)
             {
-                if (_monitor.ConsumeNotification(m.WParam, m.LParam, out int eventId))
+                bool accepted;
+                bool shouldRefresh = true;
+                int eventId = 0;
+                if (m.Msg == ShellChangeMonitor.DesktopMessage)
+                {
+                    accepted = _monitor.ConsumeDesktopNotification(
+                        m.WParam, m.LParam, out shouldRefresh);
+                }
+                else
+                {
+                    accepted = _monitor.ConsumeNotification(
+                        m.WParam, m.LParam, out eventId);
+                }
+                if (accepted)
                 {
                     ++Notifications;
                     if (m.Msg == ShellChangeMonitor.BinMessage) ++BinNotifications;
-                    else ++DesktopNotifications;
-                    int key = (m.Msg == ShellChangeMonitor.BinMessage ? 0x10000000 : 0x20000000) | eventId;
-                    _types[key] = _types.GetValueOrDefault(key) + 1;
+                    else
+                    {
+                        ++DesktopNotifications;
+                        if (shouldRefresh) ++RelevantDesktopNotifications;
+                    }
+                    if (m.Msg == ShellChangeMonitor.BinMessage)
+                    {
+                        int key = 0x10000000 | eventId;
+                        _types[key] = _types.GetValueOrDefault(key) + 1;
+                    }
                 }
             }
             base.WndProc(ref m);
@@ -244,6 +265,7 @@ internal static class Program
                 {
                     int oldBin = sink.BinNotifications;
                     int oldDesktop = sink.DesktopNotifications;
+                    int oldRelevant = sink.RelevantDesktopNotifications;
                     long oldCount = BinHelper.GetBinSize().itemCount;
                     string disposable = Path.Combine(workspace,
                         "simplebin-safe-secondary-" + Guid.NewGuid().ToString("N") + ".txt");
@@ -258,13 +280,14 @@ internal static class Program
                         Thread.Sleep(20);
                     }
                     long newCount = BinHelper.GetBinSize().itemCount;
-                    Console.WriteLine($"INFO: Secondary-volume recycle: before={oldCount} after={newCount} binEvents={sink.BinNotifications-oldBin} desktopEvents={sink.DesktopNotifications-oldDesktop} types={sink.TypeSummary}");
+                    Console.WriteLine($"INFO: Secondary-volume recycle: before={oldCount} after={newCount} binEvents={sink.BinNotifications-oldBin} desktopEvents={sink.DesktopNotifications-oldDesktop} relevantDesktopEvents={sink.RelevantDesktopNotifications-oldRelevant} types={sink.TypeSummary}");
                     if (newCount > oldCount)
                         Pass("secondary drive Recycle Bin query detects recycled file", true);
                     else
                         Console.WriteLine("WARN: secondary drive did not expose recycle bin to this Windows account.");
-                    if (sink.BinNotifications > oldBin || sink.DesktopNotifications > oldDesktop)
-                        Pass("secondary drive deletion generated subscribed Shell event", true);
+                    if (sink.BinNotifications > oldBin ||
+                        sink.RelevantDesktopNotifications > oldRelevant)
+                        Pass("secondary drive deletion generated an actionable Shell event", true);
                     else
                         Console.WriteLine("WARN: deletion on secondary mounted drive did not reach scoped notifications.");
                 }
