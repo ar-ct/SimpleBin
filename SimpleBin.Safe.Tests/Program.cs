@@ -21,6 +21,9 @@ internal static class Program
         internal int Notifications { get; private set; }
         internal int BinNotifications { get; private set; }
         internal int DesktopNotifications { get; private set; }
+        private readonly Dictionary<int,int> _types = new();
+        internal string TypeSummary => string.Join(", ",
+            _types.OrderBy(x => x.Key).Select(x => $"0x{x.Key:X}={x.Value}"));
 
         internal MessageSink(ShellChangeMonitor monitor)
         {
@@ -33,11 +36,13 @@ internal static class Program
             if (m.Msg == ShellChangeMonitor.BinMessage ||
                 m.Msg == ShellChangeMonitor.DesktopMessage)
             {
-                if (_monitor.ConsumeNotification(m.WParam, m.LParam))
+                if (_monitor.ConsumeNotification(m.WParam, m.LParam, out int eventId))
                 {
                     ++Notifications;
                     if (m.Msg == ShellChangeMonitor.BinMessage) ++BinNotifications;
                     else ++DesktopNotifications;
+                    int key = (m.Msg == ShellChangeMonitor.BinMessage ? 0x10000000 : 0x20000000) | eventId;
+                    _types[key] = _types.GetValueOrDefault(key) + 1;
                 }
             }
             base.WndProc(ref m);
@@ -253,7 +258,7 @@ internal static class Program
                         Thread.Sleep(20);
                     }
                     long newCount = BinHelper.GetBinSize().itemCount;
-                    Console.WriteLine($"INFO: Secondary-volume recycle: before={oldCount} after={newCount} binEvents={sink.BinNotifications-oldBin} desktopEvents={sink.DesktopNotifications-oldDesktop}");
+                    Console.WriteLine($"INFO: Secondary-volume recycle: before={oldCount} after={newCount} binEvents={sink.BinNotifications-oldBin} desktopEvents={sink.DesktopNotifications-oldDesktop} types={sink.TypeSummary}");
                     if (newCount > oldCount)
                         Pass("secondary drive Recycle Bin query detects recycled file", true);
                     else
