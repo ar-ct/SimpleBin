@@ -22,7 +22,13 @@ namespace SimpleBin.Helpers
         // Recycle Bin is also a shell item displayed on the desktop.
         // Desktop scope is NOT recursive: unrelated deep file activity
         // does not flood the application with notifications.
-        private const int DesktopEvents = 0x00001000 | 0x00002000 | 0x00008000;
+        private const int DesktopEvents =
+            0x00000001 | // SHCNE_RENAMEITEM
+            0x00000004 | // SHCNE_DELETE
+            0x00000010 | // SHCNE_RMDIR
+            0x00001000 | // SHCNE_UPDATEDIR (coalesced events)
+            0x00002000 | // SHCNE_UPDATEITEM
+            0x00008000;  // SHCNE_UPDATEIMAGE
 
         private static readonly Guid RecycleBinFolder =
             new("B7534046-3ECB-4C18-BE4E-64CD4CB7D6AC");
@@ -91,7 +97,7 @@ namespace SimpleBin.Helpers
                     out _desktopPidl);
                 if (hr == 0 && _desktopPidl != IntPtr.Zero)
                     _desktopRegistration = TryRegister(windowHandle, DesktopEvents,
-                        DesktopMessage, _desktopPidl, recursive: false);
+                        DesktopMessage, _desktopPidl, recursive: true);
             }
             catch
             {
