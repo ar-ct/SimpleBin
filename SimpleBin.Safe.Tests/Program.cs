@@ -19,6 +19,8 @@ internal static class Program
     {
         private readonly ShellChangeMonitor _monitor;
         internal int Notifications { get; private set; }
+        internal int BinNotifications { get; private set; }
+        internal int DesktopNotifications { get; private set; }
 
         internal MessageSink(ShellChangeMonitor monitor)
         {
@@ -32,7 +34,11 @@ internal static class Program
                 m.Msg == ShellChangeMonitor.DesktopMessage)
             {
                 if (_monitor.ConsumeNotification(m.WParam, m.LParam))
+                {
                     ++Notifications;
+                    if (m.Msg == ShellChangeMonitor.BinMessage) ++BinNotifications;
+                    else ++DesktopNotifications;
+                }
             }
             base.WndProc(ref m);
         }
@@ -219,6 +225,50 @@ internal static class Program
             catch (Exception ex)
             {
                 Console.WriteLine("WARN: noninteractive CI runner could not perform natural Recycle Bin test: " + ex.Message);
+            }
+
+            // Probe a SECONDARY mounted volume (runner workspace on D:).
+            try
+            {
+                string? workspace = Environment.GetEnvironmentVariable("GITHUB_WORKSPACE");
+                if (!string.IsNullOrWhiteSpace(workspace) &&
+                    Directory.Exists(workspace) &&
+                    !string.Equals(Path.GetPathRoot(workspace),
+                                   Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)),
+                                   StringComparison.OrdinalIgnoreCase))
+                {
+                    int oldBin = sink.BinNotifications;
+                    int oldDesktop = sink.DesktopNotifications;
+                    long oldCount = BinHelper.GetBinSize().itemCount;
+                    string disposable = Path.Combine(workspace,
+                        "simplebin-safe-secondary-" + Guid.NewGuid().ToString("N") + ".txt");
+                    File.WriteAllText(disposable, "Disposable GitHub Actions secondary-volume test");
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                        disposable,
+                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+                    for (int i = 0; i < 100; ++i)
+                    {
+                        Application.DoEvents();
+                        Thread.Sleep(20);
+                    }
+                    long newCount = BinHelper.GetBinSize().itemCount;
+                    Console.WriteLine($"INFO: Secondary-volume recycle: before={oldCount} after={newCount} binEvents={sink.BinNotifications-oldBin} desktopEvents={sink.DesktopNotifications-oldDesktop}");
+                    if (newCount > oldCount)
+                        Pass("secondary drive Recycle Bin query detects recycled file", true);
+                    else
+                        Console.WriteLine("WARN: secondary drive did not expose recycle bin to this Windows account.");
+                    if (sink.BinNotifications > oldBin || sink.DesktopNotifications > oldDesktop)
+                        Pass("secondary drive deletion generated subscribed Shell event", true);
+                    else
+                        Console.WriteLine("WARN: deletion on secondary mounted drive did not reach scoped notifications.");
+                }
+                else
+                    Console.WriteLine("WARN: CI workspace is not on a secondary volume.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("WARN: secondary-volume test could not run on CI: " + ex.Message);
             }
 
             int beforeSynthetic = sink.Notifications;
