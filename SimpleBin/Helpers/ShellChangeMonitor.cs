@@ -37,11 +37,12 @@ namespace SimpleBin.Helpers
             0x00001000 | // SHCNE_UPDATEDIR
             0x00002000 | // SHCNE_UPDATEITEM
             0x00008000 | // SHCNE_UPDATEIMAGE
-            0x00020000;  // SHCNE_RENAMEFOLDER
+            0x00020000 | // SHCNE_RENAMEFOLDER
+            0x04000000;  // SHCNE_EXTENDED_EVENT (observed in Windows CI)
 
         private const int DeletionOrIconEvents =
             0x00000001 | 0x00000004 | 0x00000010 |
-            0x00008000 | 0x00020000;
+            0x00008000 | 0x00020000 | 0x04000000;
 
         private const int MaybeRecycleBinEvents =
             0x00000002 | 0x00000008 | 0x00001000 | 0x00002000;
