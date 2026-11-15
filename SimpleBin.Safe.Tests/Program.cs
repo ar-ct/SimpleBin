@@ -54,7 +54,7 @@ internal static class Program
             RunPureLogicChecks();
             RunWindowsReadOnlyChecks();
             RunShellNotificationSmoke();
-            Console.WriteLine($"TOTAL: {_passed} deterministic/read-only checks passed.");
+            Console.WriteLine($"TOTAL: {_passed} isolated Windows checks passed.");
             Console.WriteLine("NOTE: Synthetic Shell notifications cannot prove that real Recycle Bin events or VeraCrypt mount notifications always arrive.");
             return 0;
         }

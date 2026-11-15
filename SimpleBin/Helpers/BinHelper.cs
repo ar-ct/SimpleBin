@@ -23,7 +23,7 @@ namespace SimpleBin
             IntPtr hwnd, string? pszRootPath, uint flags);
     }
 
-    public sealed class BinHelper
+    internal static class BinHelper
     {
         internal static (long byteSize, long itemCount) GetBinSize()
         {

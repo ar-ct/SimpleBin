@@ -11,7 +11,6 @@ namespace SimpleBin
             try
             {
                 Application.Run(new MainWindow(
-                    new BinHelper(),
                     new IconHelper(MainWindow.IsSystemDarkThemeEnabled())));
             }
             catch (Exception ex)

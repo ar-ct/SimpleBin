@@ -13,13 +13,13 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<TargetFramework>net10.0-windows</TargetFramework>
 		<ApplicationIcon>App.ico</ApplicationIcon>
-		<AssemblyVersion>1.1.1</AssemblyVersion>
+		<AssemblyVersion>1.1.2</AssemblyVersion>
 		<FileVersion>$(AssemblyVersion)</FileVersion>
 		<Version>$(AssemblyVersion)</Version>
 		<Authors>exalaolir</Authors>
 		<Company>SimpleBinSafe</Company>
 		<Copyright>$(Authors) © $([System.DateTime]::UtcNow.Year)</Copyright>
-		<PackageProjectUrl>https://github.com/exalaolir/SimpleBin</PackageProjectUrl>
+		<PackageProjectUrl>https://github.com/ar-ct/SimpleBin</PackageProjectUrl>
 		<Description>This is a small program that adds a system recycle bin shortcut to the tray.</Description>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<NoWarn>$(NoWarn);WFO5001</NoWarn>

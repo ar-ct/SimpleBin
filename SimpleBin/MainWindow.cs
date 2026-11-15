@@ -9,7 +9,6 @@ namespace SimpleBin
 {
     public partial class MainWindow : Form
     {
-        private readonly BinHelper _binHelper;
         private readonly IconHelper _iconHelper;
         private bool _isSystemDarkTheme;
         private bool _isRestarting;
@@ -23,7 +22,7 @@ namespace SimpleBin
         private int _topologyChecksRemaining;
         private long _refreshDueTick;
 
-        public MainWindow(BinHelper binHelper, IconHelper iconHelper)
+        public MainWindow(IconHelper iconHelper)
         {
             var sysLang = CultureInfo.CurrentUICulture.Name;
             var appLang = "en-001";
@@ -53,7 +52,6 @@ namespace SimpleBin
                 RemoveFromStartupBtn.Enabled = false;
             }
 
-            _binHelper = binHelper;
             _eventTimer = new System.Windows.Forms.Timer { Interval = 750 };
             _eventTimer.Tick += (_, _) => OnRefreshTimer();
             TrayMenu.Opening += (_, _) =>
@@ -191,6 +189,7 @@ namespace SimpleBin
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            _initialized = false;
             _eventTimer.Stop();
             _eventTimer.Dispose();
             _shellMonitor.Dispose();
@@ -608,7 +607,7 @@ namespace SimpleBin
 
         private void repoLink_Click(object sender, EventArgs e) => Process.Start(new ProcessStartInfo
         {
-            FileName = @"https://github.com/exalaolir/SimpleBin",
+            FileName = @"https://github.com/ar-ct/SimpleBin",
             UseShellExecute = true,
         });
     }
