@@ -132,10 +132,14 @@ namespace SimpleBin.Helpers
 
         // SHCNRF_NewDelivery: wParam is hChange, lParam is process ID.
         // Locking and unlocking is mandatory for successfully delivered data.
-        internal bool ConsumeNotification(IntPtr wParam, IntPtr lParam)
+        internal bool ConsumeNotification(IntPtr wParam, IntPtr lParam) =>
+            ConsumeNotification(wParam, lParam, out _);
+
+        internal bool ConsumeNotification(IntPtr wParam, IntPtr lParam, out int eventId)
         {
+            eventId = 0;
             IntPtr locked = SHChangeNotification_Lock(
-                wParam, unchecked((uint)lParam.ToInt64()), out _, out _);
+                wParam, unchecked((uint)lParam.ToInt64()), out _, out eventId);
             if (locked == IntPtr.Zero) return false;
             try { return true; }
             finally { SHChangeNotification_Unlock(locked); }
