@@ -3,6 +3,7 @@ using SimpleBin.Helpers;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using SimpleBin.Helpers;
 using static SimpleBin.Helpers.AppThemeHelper;
 
 namespace SimpleBin
@@ -13,6 +14,11 @@ namespace SimpleBin
         private readonly IconHelper _iconHelper;
         private bool _isSystemDarkTheme;
         private bool _isRestarting;
+        private readonly ShellChangeMonitor _shellMonitor = new();
+        private readonly System.Windows.Forms.Timer _eventTimer;
+        private bool _initialized;
+        private bool _isClearing;
+        private bool _removalPending;
 
         public MainWindow(BinHelper binHelper, IconHelper iconHelper)
         {
@@ -45,22 +51,78 @@ namespace SimpleBin
             }
 
             _binHelper = binHelper;
+            _eventTimer = new System.Windows.Forms.Timer { Interval = 750 };
+            _eventTimer.Tick += (_, _) =>
+            {
+                _eventTimer.Stop();
+                if (!_isClearing && !_removalPending) UpdateStatsControls();
+            };
+            TrayMenu.Opening += (_, _) =>
+            {
+                _eventTimer.Stop();
+                if (!_isClearing && !_removalPending) UpdateStatsControls();
+            };
+            _initialized = true;
             UpdateStatsControls();
 
-            _binHelper.Update += BinHelper_Update;
-
-            this.Load += (s, e) => RecoverFormState();
+            this.Load += (_, _) =>
+            {
+                StartShellMonitoring();
+                RecoverFormState();
+            };
         }
 
-        private void BinHelper_Update(object? sender, EventArgs e)
+        private void StartShellMonitoring()
         {
-            if (IsDisposed || !IsHandleCreated)
-                return;
-
-            if (InvokeRequired)
-                BeginInvoke(UpdateStatsControls);
-            else
+            if (!_initialized || !IsHandleCreated || _shellMonitor.IsActive) return;
+            try
+            {
+                _shellMonitor.Start(Handle);
                 UpdateStatsControls();
+            }
+            catch (Exception ex)
+            {
+                TrayIcon.Text = "SimpleBin Safe - notifications unavailable";
+                MessageBox.Show(
+                    "Shell notifications could not be registered.\n" + ex.Message +
+                    "\nOpening the tray menu still refreshes the status.",
+                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void QueueRefresh(int delay = 750)
+        {
+            if (!_initialized || _isClearing || _removalPending || IsDisposed) return;
+            _eventTimer.Stop();
+            _eventTimer.Interval = delay;
+            _eventTimer.Start();
+        }
+
+        private static bool IsVolumeNotification(IntPtr data)
+        {
+            if (data == IntPtr.Zero) return false;
+            // DEV_BROADCAST_HDR: size, device type, reserved. DBT_DEVTYP_VOLUME = 2.
+            return System.Runtime.InteropServices.Marshal.ReadInt32(data, 4) == 2;
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (_initialized) StartShellMonitoring();
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            _shellMonitor.Stop();
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            _eventTimer.Stop();
+            _eventTimer.Dispose();
+            _shellMonitor.Dispose();
+            base.OnFormClosed(e);
         }
 
         private void Form1_ThemeChanged(bool isDarkTheme)
@@ -97,7 +159,7 @@ namespace SimpleBin
             //GC.Collect(2, GCCollectionMode.Forced);
             //GC.WaitForPendingFinalizers();
 
-            //// 3. Î÷èñòêà êýøà GDI+
+            //// 3. ÃŽÃ·Ã¨Ã±Ã²ÃªÃ  ÃªÃ½Ã¸Ã  GDI+
             //System.Drawing.Graphics.FromHwnd(IntPtr.Zero).Dispose();
         }
 
@@ -111,19 +173,62 @@ namespace SimpleBin
 
         private void UpdateStatsControls()
         {
-            var (biteSize, itemCount) = BinHelper.GetBinSize();
-            SizeToolStripItem.Text = $"{SizeToolStripItem.Text?.Split()[0]} {ConvertSizeToString(biteSize)}";
-            ElementsToolStripItem.Text = $"{ElementsToolStripItem.Text?.Split()[0]} {itemCount}";
-            ClearToolStripItem.Enabled = !BinHelper.IsBinEmpty();
-
-            TrayIcon.Icon = itemCount == 0
-                ? _iconHelper.GetEmptyIcon()
-                : _iconHelper.GetIcon();
+            try
+            {
+                var (byteSize, itemCount) = BinHelper.GetBinSize();
+                SizeToolStripItem.Text = $"{SizeToolStripItem.Text?.Split()[0]} {ConvertSizeToString(byteSize)}";
+                ElementsToolStripItem.Text = $"{ElementsToolStripItem.Text?.Split()[0]} {itemCount}";
+                ClearToolStripItem.Enabled = itemCount > 0 && !_isClearing && !_removalPending;
+                TrayIcon.Icon = itemCount == 0
+                    ? _iconHelper.GetEmptyIcon()
+                    : _iconHelper.GetIcon();
+                TrayIcon.Text = _shellMonitor.IsActive
+                    ? "SimpleBin Safe"
+                    : "SimpleBin Safe - notifications unavailable";
+            }
+            catch (Exception)
+            {
+                // Unknown is never treated as an empty Recycle Bin.
+                SizeToolStripItem.Text = "Size: unavailable";
+                ElementsToolStripItem.Text = "Items: unavailable";
+                ClearToolStripItem.Enabled = false;
+                TrayIcon.Icon = _iconHelper.GetIcon();
+                TrayIcon.Text = "SimpleBin Safe - state unavailable";
+            }
         }
 
         private void SettingsToolStripItem_Click(object sender, EventArgs e) => ShowForm();
 
-        private void ClearToolStripItem_Click(object sender, EventArgs e) => BinHelper.ClearBin();
+        private void ClearToolStripItem_Click(object sender, EventArgs e)
+        {
+            if (_isClearing || _removalPending) return;
+            _isClearing = true;
+            _eventTimer.Stop();
+            ClearToolStripItem.Enabled = false;
+
+            try
+            {
+                // Exclusive deletion pathway: Windows Shell empties all available bins.
+                int hr = BinHelper.ClearBin();
+                const int Cancelled = unchecked((int)0x800704C7);
+                if (hr < 0 && hr != Cancelled)
+                {
+                    MessageBox.Show(
+                        $"Windows failed to empty all Recycle Bins (HRESULT 0x{hr:X8}).",
+                        "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "SimpleBin Safe",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _isClearing = false;
+                if (!_removalPending) UpdateStatsControls();
+            }
+        }
 
         private static string ConvertSizeToString(long size) => size switch
         {
@@ -142,21 +247,75 @@ namespace SimpleBin
         protected override void WndProc(ref Message m)
         {
             const int WM_SETTINGCHANGE = 0x001A;
+            const int WM_DEVICECHANGE = 0x0219;
+            const int WM_POWERBROADCAST = 0x0218;
+
+            if (_initialized &&
+                (m.Msg == ShellChangeMonitor.BinMessage ||
+                 m.Msg == ShellChangeMonitor.DriveMessage))
+            {
+                if (_shellMonitor.ConsumeNotification(m.WParam, m.LParam))
+                    QueueRefresh(m.Msg == ShellChangeMonitor.DriveMessage ? 1100 : 500);
+                else
+                    QueueRefresh(1100);
+                return;
+            }
+
+            if (_initialized && m.Msg == WM_DEVICECHANGE)
+            {
+                long code = m.WParam.ToInt64();
+                if (code == 0x0007) // DBT_DEVNODES_CHANGED: some virtual providers
+                {
+                    QueueRefresh(1100);
+                }
+                else if (IsVolumeNotification(m.LParam))
+                {
+                    if (code == 0x8001 || code == 0x8003) // QUERYREMOVE/PENDING
+                    {
+                        _removalPending = true;
+                        _eventTimer.Stop();
+                        ClearToolStripItem.Enabled = false;
+                    }
+                    else if (code == 0x8000 || code == 0x8004 || code == 0x8002)
+                    {
+                        // ARRIVAL, REMOVECOMPLETE or QUERYREMOVEFAILED
+                        _removalPending = false;
+                        QueueRefresh(1100);
+                    }
+                }
+            }
+
+            if (_initialized && m.Msg == WM_POWERBROADCAST)
+            {
+                if (m.WParam.ToInt64() == 0x0004) // PBT_APMSUSPEND
+                {
+                    _eventTimer.Stop();
+                    _removalPending = true;
+                    ClearToolStripItem.Enabled = false;
+                }
+                else if (m.WParam.ToInt64() == 0x0012 ||
+                         m.WParam.ToInt64() == 0x0007) // resume automatic or interactive
+                {
+                    _removalPending = false;
+                    QueueRefresh(1100);
+                }
+            }
+
             if (m.Msg == WM_SETTINGCHANGE && m.LParam != IntPtr.Zero)
             {
                 bool currentTheme = IsSystemDarkThemeEnabled();
-
                 if (_isSystemDarkTheme != currentTheme)
                 {
                     _isSystemDarkTheme = currentTheme;
                     ThemeChanged?.Invoke(currentTheme);
-
                     if (AppThemeHelper.GetAppTheme() == Theme.System && !_isRestarting)
                     {
-                        BeginInvoke(new Action(() => SaveFormStateAndRestart(needRecoverFormState: this.ShowInTaskbar)));
+                        BeginInvoke(new Action(() =>
+                            SaveFormStateAndRestart(needRecoverFormState: this.ShowInTaskbar)));
                     }
                 }
             }
+
             base.WndProc(ref m);
         }
 
