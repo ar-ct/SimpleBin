@@ -3,7 +3,7 @@ name: Build SimpleBin Safe for Windows
 on:
   workflow_dispatch:
   push:
-    branches: [simplebin-safe-event-driven]
+    branches: [simplebin-safe-event-driven, simplebin-safe-encrypted-volume-fix]
     paths:
       - 'SimpleBin/**'
       - 'SimpleBin.Safe.Tests/**'
