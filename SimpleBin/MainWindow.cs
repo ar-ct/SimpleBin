@@ -3,7 +3,6 @@ using SimpleBin.Helpers;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
-using SimpleBin.Helpers;
 using static SimpleBin.Helpers.AppThemeHelper;
 
 namespace SimpleBin
@@ -102,7 +101,8 @@ namespace SimpleBin
         {
             if (data == IntPtr.Zero) return false;
             // DEV_BROADCAST_HDR: size, device type, reserved. DBT_DEVTYP_VOLUME = 2.
-            return System.Runtime.InteropServices.Marshal.ReadInt32(data, 4) == 2;
+            return System.Runtime.InteropServices.Marshal.ReadInt32(data) >= 12 &&
+                   System.Runtime.InteropServices.Marshal.ReadInt32(data, 4) == 2;
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -201,31 +201,94 @@ namespace SimpleBin
 
         private void ClearToolStripItem_Click(object sender, EventArgs e)
         {
-            if (_isClearing || _removalPending) return;
+            if (_isClearing || _removalPending || IsDisposed) return;
+
+            // The existing menu state can be stale. Fail closed if Windows
+            // cannot report the current Recycle Bin count.
+            try
+            {
+                var (_, count) = BinHelper.GetBinSize();
+                if (count == 0)
+                {
+                    UpdateStatsControls();
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateStatsControls();
+                MessageBox.Show(
+                    "Windows could not verify the Recycle Bin contents. Nothing was deleted.\n" +
+                    ex.Message,
+                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // This native Windows MessageBox is ALWAYS shown. The Shell's
+            // confirmation dialog is system-configurable and not guaranteed.
+            string question = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName switch
+            {
+                "ru" => "Безвозвратно удалить содержимое корзин на ВСЕХ сейчас подключённых дисках?\nВключая доступные зашифрованные тома.\nОтменить удаление файлов после этого будет нельзя.",
+                "pl" => "Trwale usunąć zawartość Koszy na WSZYSTKICH podłączonych dyskach?\nObejmuje to dostępne zaszyfrowane woluminy.\nTej operacji nie można cofnąć.",
+                _ => "Permanently empty the Recycle Bins on ALL currently connected drives?\nThis includes available encrypted volumes.\nThe deletion cannot be undone."
+            };
+            if (MessageBox.Show(
+                question, "SimpleBin Safe - Confirm emptying Recycle Bin",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                UpdateStatsControls();
+                return;
+            }
+
             _isClearing = true;
             _eventTimer.Stop();
             ClearToolStripItem.Enabled = false;
-
             try
             {
-                // Exclusive deletion pathway: Windows Shell empties all available bins.
+                // The ONLY destructive operation: Windows Shell, all available
+                // Recycle Bins, no direct deletion and no suppressed UI flags.
                 int hr = BinHelper.ClearBin();
-                const int Cancelled = unchecked((int)0x800704C7);
-                if (hr < 0 && hr != Cancelled)
+                const int cancelled = unchecked((int)0x800704C7);
+                if (hr == cancelled) return;
+                if (hr != 0)
                 {
                     MessageBox.Show(
-                        $"Windows failed to empty all Recycle Bins (HRESULT 0x{hr:X8}).",
+                        $"Windows did not report a successful Recycle Bin cleanup (HRESULT 0x{hr:X8}).",
+                        "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                try
+                {
+                    long remaining = BinHelper.GetBinSize().itemCount;
+                    if (remaining > 0)
+                    {
+                        MessageBox.Show(
+                            $"Windows reports {remaining} item(s) still in currently accessible Recycle Bins. " +
+                            "The cleanup may be incomplete, or other items may have arrived.",
+                            "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        "Windows did not allow the post-cleanup verification. " +
+                        "The empty state cannot be confirmed.\n" + ex.Message,
                         "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message, "SimpleBin Safe",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(
+                    "Recycle Bin cleanup did not complete normally.\n" + ex.Message,
+                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
                 _isClearing = false;
+                // No success is ever inferred from the call's return value
+                // without a fresh attempt to read the state.
                 if (!_removalPending) UpdateStatsControls();
             }
         }
@@ -264,9 +327,12 @@ namespace SimpleBin
             if (_initialized && m.Msg == WM_DEVICECHANGE)
             {
                 long code = m.WParam.ToInt64();
-                if (code == 0x0007) // DBT_DEVNODES_CHANGED: some virtual providers
+                if (code == 0x0007) // DBT_DEVNODES_CHANGED: a topology change
                 {
-                    QueueRefresh(1100);
+                    // Some virtual volume providers omit the expected final
+                    // volume-specific event. Resynchronize on topology changes.
+                    _removalPending = false;
+                    QueueRefresh(1800);
                 }
                 else if (IsVolumeNotification(m.LParam))
                 {
