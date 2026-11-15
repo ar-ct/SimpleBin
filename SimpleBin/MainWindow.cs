@@ -224,22 +224,9 @@ namespace SimpleBin
                 return;
             }
 
-            // This native Windows MessageBox is ALWAYS shown. The Shell's
-            // confirmation dialog is system-configurable and not guaranteed.
-            string question = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName switch
-            {
-                "ru" => "Безвозвратно удалить содержимое корзин на ВСЕХ сейчас подключённых дисках?\nВключая доступные зашифрованные тома.\nОтменить удаление файлов после этого будет нельзя.",
-                "pl" => "Trwale usunąć zawartość Koszy na WSZYSTKICH podłączonych dyskach?\nObejmuje to dostępne zaszyfrowane woluminy.\nTej operacji nie można cofnąć.",
-                _ => "Permanently empty the Recycle Bins on ALL currently connected drives?\nThis includes available encrypted volumes.\nThe deletion cannot be undone."
-            };
-            if (MessageBox.Show(
-                question, "SimpleBin Safe - Confirm emptying Recycle Bin",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
-            {
-                UpdateStatsControls();
-                return;
-            }
+            // No application-created confirmation dialog: leave confirmation
+            // and progress UI to Windows Shell (SHERB_* suppression flags = 0).
+            // Whether Shell displays a prompt can depend on Windows settings.
 
             _isClearing = true;
             _eventTimer.Stop();
