@@ -1,10 +1,11 @@
-﻿using System.Runtime.InteropServices;
-using System.Security.Principal;
-using Timer = System.Threading.Timer;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 
 namespace SimpleBin
 {
-    static partial class NativeBinMethods
+    // All deletion is delegated to Windows Shell. Never enumerate or delete
+    // $Recycle.Bin directories, and never open handles on mounted volumes.
+    internal static partial class NativeBinMethods
     {
         [StructLayout(LayoutKind.Sequential)]
         internal struct Shqueryrbinfo
@@ -16,135 +17,35 @@ namespace SimpleBin
 
         [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
         internal static partial int SHQueryRecycleBinW(
-             string? pszRootPath,
-             ref Shqueryrbinfo pShQueryRbInfo);
+            string? pszRootPath, ref Shqueryrbinfo info);
 
-        [Flags]
-        internal enum RecycleBinFlags : uint
-        {
-            None = 0,
-            SherbNoconfirmation = 0x00000001,
-            SherbNoprogressui = 0x00000002,
-            SherbNosound = 0x00000004
-        }
-
-        [LibraryImport("shell32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+        [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)]
         internal static partial int SHEmptyRecycleBinW(
-             IntPtr hwnd,
-             string? pszRootPath,
-             RecycleBinFlags dwFlags);
+            IntPtr hwnd, string? pszRootPath, uint flags);
     }
 
-    public sealed class BinHelper : IDisposable
+    public sealed class BinHelper
     {
-        private readonly List<FileSystemWatcher> _watchers = [];
-        public delegate void BinUpdateHandler(object sender, FileSystemEventArgs e);
-        public event BinUpdateHandler? Update;
-        private Timer? _debounceTimer;
-        private readonly Lock _lock = new();
-        private bool _isDisposed;
-
-        public BinHelper()
+        internal static (long byteSize, long itemCount) GetBinSize()
         {
-            string? sid = (WindowsIdentity.GetCurrent().User?.Value)
-                ?? throw new InvalidOperationException("No such user");
-            string binPath = Path.Combine("$Recycle.Bin", sid);
-
-            var bins = DriveInfo.GetDrives().Where(d => d is
+            var info = new NativeBinMethods.Shqueryrbinfo
             {
-                IsReady: true,
-                DriveType: DriveType.Fixed or DriveType.Network
-            }).Select(d => Path.Combine(d.RootDirectory.FullName, binPath));
+                cbSize = Marshal.SizeOf<NativeBinMethods.Shqueryrbinfo>()
+            };
+            int hr = NativeBinMethods.SHQueryRecycleBinW(null, ref info);
+            if (hr < 0)
+                throw new Win32Exception(hr, $"Recycle Bin query failed (HRESULT 0x{hr:X8}).");
 
-            foreach (var bin in bins)
-            {
-                if (!Directory.Exists(bin)) continue;
-
-                var watcher = new FileSystemWatcher(bin)
-                {
-                    IncludeSubdirectories = false,
-                    EnableRaisingEvents = true,
-                    InternalBufferSize = 65536,
-                    Filter = "$I*",
-                    NotifyFilter = NotifyFilters.FileName
-                };
-
-                watcher.Created += OnBinChanged;
-                watcher.Deleted += OnBinChanged;
-                _watchers.Add(watcher);
-            }
-        }
-
-        internal static (long biteSize, long itemCount) GetBinSize()
-        {
-            const string? pszRootPath = null; //need to watch size from all disks
-            var info = new NativeBinMethods.Shqueryrbinfo();
-            info.cbSize = Marshal.SizeOf(info);
-            const int okCode = 0;
-
-            var result = NativeBinMethods.SHQueryRecycleBinW(pszRootPath, ref info);
-
-            if (result != okCode) throw new Exception("SHQueryRecycleBinW failed");
+            if (info.i64NumItems < 0 || info.i64Size < 0)
+                throw new InvalidOperationException("Windows returned invalid Recycle Bin counts.");
 
             return (info.i64Size, info.i64NumItems);
         }
 
-        internal static bool ClearBin()
-        {
-            const int okCode = 0;
-            var parentWindow = IntPtr.Zero;
-            const string? pszRootPath = null; //need to clear data from all disks
-
-            const NativeBinMethods.RecycleBinFlags flags = NativeBinMethods.RecycleBinFlags.SherbNoconfirmation |
-                                    NativeBinMethods.RecycleBinFlags.SherbNosound;
-
-            int resultCode = NativeBinMethods.SHEmptyRecycleBinW(parentWindow, pszRootPath, flags);
-
-            if (resultCode != okCode) throw new Exception("SHEmptyRecycleBinW failed");
-
-            return true;
-        }
-
-        private void OnBinChanged(object? sender, FileSystemEventArgs e)
-        {
-            lock (_lock)
-            {
-                _debounceTimer?.Dispose();
-                _debounceTimer = new(DebounceCallback, e, 500, Timeout.Infinite);
-            }
-        }
-
-        private void DebounceCallback(object? state)
-        {
-            lock (_lock)
-            {
-                Update?.Invoke(this, (FileSystemEventArgs)state!);
-                _debounceTimer!.Dispose();
-                _debounceTimer = null;
-            }
-        }
-
-        public static bool IsBinEmpty() => GetBinSize().itemCount == 0;
-
-        public void Dispose()
-        {
-            if (!_isDisposed)
-            {
-                lock (_lock)
-                {
-                    _debounceTimer?.Dispose();
-                    _debounceTimer = null;
-                }
-
-                foreach (var watcher in _watchers)
-                {
-                    watcher.EnableRaisingEvents = false;
-                    watcher.Dispose();
-                }
-
-                _isDisposed = true;
-                GC.SuppressFinalize(this);
-            }
-        }
+        // This is the application's ONLY operation that deletes user data.
+        // Null selects every currently available Shell-supported recycle bin.
+        // Zero flags preserve Windows native confirmation and progress dialogs.
+        internal static int ClearBin() =>
+            NativeBinMethods.SHEmptyRecycleBinW(IntPtr.Zero, null, 0);
     }
 }
