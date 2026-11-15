@@ -1,61 +1,28 @@
-﻿using Microsoft.Win32;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Reflection;
-using System.Resources;
-using System.Text;
-using System.Text.Json;
-using System.Threading.Tasks;
+using Microsoft.Win32;
 
 namespace SimpleBin.Helpers
 {
-    public static class StartupHelper
+    internal static class StartupHelper
     {
-        private const string _appName = "SimpleBin";
-        private const string _registryPath = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
+        private const string AppName = "SimpleBinSafe";
+        private const string RunKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 
-        static StartupHelper()
+        public static bool IsInStartup()
         {
-            // Use to change Registry key when .exe location is changed
-            if (IsInStartup())
-            {
-                RemoveFromStartup();
-                AddToStartup();
-            }
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey, false);
+            return !string.IsNullOrWhiteSpace(key?.GetValue(AppName) as string);
         }
 
         public static void AddToStartup()
         {
-            string appPath = Application.ExecutablePath;
-
-            using RegistryKey? rk = Registry.CurrentUser.OpenSubKey(
-                _registryPath, true);
-
-            rk?.SetValue(_appName, appPath);
-
-            rk?.Close();
-        }
-
-        public static bool IsInStartup()
-        {
-            using RegistryKey? rk = Registry.CurrentUser.OpenSubKey(
-               _registryPath, false);
-
-            string? value = rk?.GetValue(_appName) as string;
-            rk?.Close();
-
-            return !string.IsNullOrEmpty(value);
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey, true);
+            key?.SetValue(AppName, "\"" + Application.ExecutablePath + "\"");
         }
 
         public static void RemoveFromStartup()
         {
-            using RegistryKey? rk = Registry.CurrentUser.OpenSubKey(
-              _registryPath, true);
-
-            rk?.DeleteValue(_appName, false);
-            rk?.Close();
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey, true);
+            key?.DeleteValue(AppName, false);
         }
     }
 }
