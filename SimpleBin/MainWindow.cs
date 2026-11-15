@@ -19,6 +19,7 @@ namespace SimpleBin
         private bool _isClearing;
         private readonly VolumeChangeTracker _volumeChanges = new();
         private bool _suspended;
+        private bool _themeRestartAfterClear;
         private int _topologyChecksRemaining;
         private long _refreshDueTick;
 
@@ -130,13 +131,13 @@ namespace SimpleBin
             {
                 --_topologyChecksRemaining;
                 if (_topologyChecksRemaining > 0)
-                    QueueRefresh(1800); // One bounded second check.
+                    QueueRefresh(1800); // Up to three bounded checks per topology change.
             }
         }
 
         private void QueueTopologyRefresh()
         {
-            _topologyChecksRemaining = Math.Max(_topologyChecksRemaining, 2);
+            _topologyChecksRemaining = Math.Max(_topologyChecksRemaining, 3);
             QueueRefresh(1100);
         }
 
@@ -368,6 +369,16 @@ namespace SimpleBin
                     MarkStateUnavailable();
                     QueueTopologyRefresh();
                 }
+
+                // Never terminate the process during a Shell deletion operation,
+                // even if a system theme change was delivered inside the native
+                // Shell confirmation/progress message loop.
+                if (_themeRestartAfterClear && !IsDisposed)
+                {
+                    _themeRestartAfterClear = false;
+                    BeginInvoke(new Action(() =>
+                        SaveFormStateAndRestart(needRecoverFormState: ShowInTaskbar)));
+                }
             }
         }
 
@@ -417,18 +428,22 @@ namespace SimpleBin
                 }
                 else if (code is 0x8000 or 0x8001 or 0x8002 or 0x8003 or 0x8004)
                 {
-                    // Some providers do not include a volume mask. A zero
-                    // mask is treated as unknown, never as 'all volumes'.
-                    TryGetDeviceVolumeMask(m.LParam, out uint letters);
-                    VolumeEvent action = code switch
+                    // Ignore device-interface and HID events. Only actual
+                    // DBT_DEVTYP_VOLUME messages may affect drive readiness.
+                    // Virtual drives that omit this message are still handled
+                    // through Shell drive changes and DBT_DEVNODES_CHANGED.
+                    if (TryGetDeviceVolumeMask(m.LParam, out uint letters))
                     {
-                        0x8000 => VolumeEvent.Arrival,
-                        0x8001 => VolumeEvent.RemovalRequested,
-                        0x8002 => VolumeEvent.RemovalCancelled,
-                        0x8003 => VolumeEvent.RemovalPending,
-                        _ => VolumeEvent.RemovalCompleted
-                    };
-                    RecordVolumeEvent(action, letters);
+                        VolumeEvent action = code switch
+                        {
+                            0x8000 => VolumeEvent.Arrival,
+                            0x8001 => VolumeEvent.RemovalRequested,
+                            0x8002 => VolumeEvent.RemovalCancelled,
+                            0x8003 => VolumeEvent.RemovalPending,
+                            _ => VolumeEvent.RemovalCompleted
+                        };
+                        RecordVolumeEvent(action, letters);
+                    }
                 }
             }
 
@@ -457,8 +472,11 @@ namespace SimpleBin
                     ThemeChanged?.Invoke(currentTheme);
                     if (AppThemeHelper.GetAppTheme() == Theme.System && !_isRestarting)
                     {
-                        BeginInvoke(new Action(() =>
-                            SaveFormStateAndRestart(needRecoverFormState: this.ShowInTaskbar)));
+                        if (_isClearing)
+                            _themeRestartAfterClear = true;
+                        else
+                            BeginInvoke(new Action(() =>
+                                SaveFormStateAndRestart(needRecoverFormState: ShowInTaskbar)));
                     }
                 }
             }
@@ -482,16 +500,32 @@ namespace SimpleBin
 
         private void AddToStartupBtn_Click(object sender, EventArgs e)
         {
-            StartupHelper.AddToStartup();
-            AddToStartupBtn.Enabled = false;
-            RemoveFromStartupBtn.Enabled = true;
+            try
+            {
+                StartupHelper.AddToStartup();
+                AddToStartupBtn.Enabled = false;
+                RemoveFromStartupBtn.Enabled = true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Unable to enable startup.\n" + ex.Message,
+                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void RemoveFromStartupBtn_Click(object sender, EventArgs e)
         {
-            StartupHelper.RemoveFromStartup();
-            AddToStartupBtn.Enabled = true;
-            RemoveFromStartupBtn.Enabled = false;
+            try
+            {
+                StartupHelper.RemoveFromStartup();
+                AddToStartupBtn.Enabled = true;
+                RemoveFromStartupBtn.Enabled = false;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Unable to disable startup.\n" + ex.Message,
+                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void InitializeThemeComboBox()

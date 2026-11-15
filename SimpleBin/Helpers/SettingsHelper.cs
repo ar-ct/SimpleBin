@@ -1,16 +1,10 @@
-﻿using SimpleBin.Extensions;
 using SimpleBin.Properties;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace SimpleBin.Helpers
 {
     internal static class SettingsHelper
     {
-        public static T Get<T>(Func<Settings, T> getter, T fallback)
+        internal static T Get<T>(Func<Settings, T> getter, T fallback)
         {
             try
             {
@@ -18,13 +12,12 @@ namespace SimpleBin.Helpers
             }
             catch
             {
-                Settings.Default.Reset();
-                Settings.Default.Save();
+                // A failed read must NEVER reset or overwrite all user settings.
                 return fallback;
             }
         }
 
-        public static void Save(Action<Settings> setter)
+        internal static void Save(Action<Settings> setter)
         {
             try
             {
@@ -33,8 +26,8 @@ namespace SimpleBin.Helpers
             }
             catch
             {
-                MessageBox.Show("Can not save user settings");
-                // TODO: Create custom error box. Low priority, because an exceptional situation is extremely unlikely 
+                MessageBox.Show("Unable to save SimpleBin Safe preferences.",
+                    "SimpleBin Safe", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
     }

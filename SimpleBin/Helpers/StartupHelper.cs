@@ -7,19 +7,22 @@ namespace SimpleBin.Helpers
         private const string AppName = "SimpleBinSafe";
         private const string RunKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 
-        public static bool IsInStartup()
+        internal static bool IsInStartup()
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey, false);
             return !string.IsNullOrWhiteSpace(key?.GetValue(AppName) as string);
         }
 
-        public static void AddToStartup()
+        // This user-registry change happens only after an explicit click.
+        internal static void AddToStartup()
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RunKey, true);
-            key?.SetValue(AppName, "\"" + Application.ExecutablePath + "\"");
+            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
+            if (key is null)
+                throw new InvalidOperationException("Windows denied access to the user startup key.");
+            key.SetValue(AppName, "\"" + Application.ExecutablePath + "\"");
         }
 
-        public static void RemoveFromStartup()
+        internal static void RemoveFromStartup()
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey, true);
             key?.DeleteValue(AppName, false);
