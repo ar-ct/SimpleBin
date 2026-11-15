@@ -15,7 +15,6 @@
         {
             if (disposing && (components != null))
             {
-                _binHelper.Update -= BinHelper_Update;
                 TrayIcon.MouseClick -= TrayIcon_MouseClick;
                 TrayIcon.ContextMenuStrip?.Dispose();
                 TrayIcon.Dispose();
