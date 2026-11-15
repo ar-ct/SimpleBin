@@ -7,6 +7,7 @@ on:
     paths:
       - 'SimpleBin/**'
       - 'SimpleBin.Safe.Tests/**'
+      - 'SimpleBin.UI.Tests/**'
       - '.github/workflows/build-safe.yml'
       - 'SAFE-FORK.md'
 
@@ -39,6 +40,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows safety test harness failed ($LASTEXITCODE)" }
       - name: Compile
         run: dotnet build SimpleBin/SimpleBin.csproj -c Release -r win-x64 -p:PublishReadyToRun=false
+      - name: Exercise actual MainWindow and original embedded icons
+        shell: pwsh
+        run: |
+          dotnet run --project SimpleBin.UI.Tests/SimpleBin.UI.Tests.csproj -c Release -r win-x64 2>&1 | Tee-Object -FilePath ui-smoke-results.txt
+          if ($LASTEXITCODE -ne 0) { throw "Windows UI/icon smoke test failed ($LASTEXITCODE)" }
       - name: Publish portable self-contained Windows EXE
         run: dotnet publish SimpleBin/SimpleBin.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=false -p:DebugType=none -o publish
       - name: Generate SHA256 checksum
@@ -52,4 +58,5 @@ jobs:
           path: |
             publish/*
             test-results.txt
+            ui-smoke-results.txt
           if-no-files-found: error
