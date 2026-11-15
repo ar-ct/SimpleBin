@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 namespace SimpleBin.Helpers
 {
     /// <summary>
-    /// Event-only Shell notifications. No FileSystemWatcher, no enumeration
+    /// Event-only Shell notifications. No persistent directory watching, no enumeration
     /// of $Recycle.Bin directories and no open directory handles on a drive.
     /// </summary>
     internal sealed class ShellChangeMonitor : IDisposable
