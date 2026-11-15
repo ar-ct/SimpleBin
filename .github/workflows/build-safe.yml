@@ -1,0 +1,47 @@
+name: Build SimpleBin Safe for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [simplebin-safe-event-driven]
+    paths:
+      - 'SimpleBin/**'
+      - '.github/workflows/build-safe.yml'
+      - 'SAFE-FORK.md'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install .NET SDK 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Verify safety properties of shipped source
+        shell: pwsh
+        run: |
+          $sources = Get-ChildItem SimpleBin -Recurse -Filter *.cs -File
+          $unsafe = 'FileSystemWatcher|Directory\.Delete\s*\(|File\.Delete\s*\(|DirectoryInfo\.Delete\s*\(|SHERB_NOCONFIRMATION|Process\.Start\s*\(\s*"cmd'
+          $hits = $sources | Select-String -Pattern $unsafe
+          if ($hits) { $hits | Out-String | Write-Host; throw 'Unsafe source operation found' }
+          $source = ($sources | Get-Content -Raw) -join "`n"
+          $occurrences = ([regex]::Matches($source, 'SHEmptyRecycleBinW\s*\(')).Count
+          if ($occurrences -ne 2) { throw "Unexpected deletion entry points: $occurrences" }
+      - name: Compile
+        run: dotnet build SimpleBin/SimpleBin.csproj -c Release -r win-x64 -p:PublishReadyToRun=false
+      - name: Publish portable self-contained Windows EXE
+        run: dotnet publish SimpleBin/SimpleBin.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=false -p:DebugType=none -o publish
+      - name: Generate SHA256 checksum
+        shell: pwsh
+        run: |
+          Get-FileHash publish/SimpleBinSafe.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  SimpleBinSafe.exe" } | Set-Content publish/SHA256SUMS.txt
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleBinSafe-win-x64-portable
+          path: publish/*
+          if-no-files-found: error
